@@ -1,205 +1,268 @@
 import streamlit as st
 import os
-import re
-import tempfile
-from langchain_community.document_loaders import PyPDFLoader
-from langchain_text_splitters import RecursiveCharacterTextSplitter
-from langchain_community.embeddings import HuggingFaceEmbeddings
-from langchain_community.vectorstores import Chroma
-from langchain_community.retrievers import BM25Retriever
-from langchain.retrievers import EnsembleRetriever
-from langchain_openai import ChatOpenAI
+from dotenv import load_dotenv
+
 from langchain_core.prompts import ChatPromptTemplate
 from langchain_core.runnables import RunnablePassthrough
 from langchain_core.output_parsers import StrOutputParser
 
-# ==========================================
-# 1. 설정 및 캐싱 (성능 최적화)
-# ==========================================
+from core.models import (
+    load_models, 
+    get_downloaded_models,
+    switch_model_via_sdk, 
+    HAS_LMS_SDK
+)
+from core.loader import process_pdf
+
+
+load_dotenv()
 st.set_page_config(page_title="Private Knowledge Brain", page_icon="🧠")
-st.title("🧠 Private Knowledge Brain (LM Studio)")
+st.title("Private Knowledge Brain")
+
+
+# 사이드바 폰트 및 줄바꿈 처리
+st.markdown("""
+<style>
+    [data-testid="stSidebar"] [data-baseweb="select"] span {
+        font-size: 0.9rem !important;
+        white-space: normal !important; /* 긴 이름 줄바꿈 허용 */
+        line-height: 1.2 !important;
+        height: auto !important;
+    }
+    ul[data-testid="stSelectboxVirtualDropdown"] li span {
+        font-size: 0.85rem !important;
+        font-family: monospace !important;
+    }
+</style>
+""", unsafe_allow_html=True)
+
 
 # 사이드바 설정
 with st.sidebar:
-    st.header("⚙️ LM Studio 설정")
+    st.header("LM Studio 설정")
+    
+    # 1. URL 설정
     lm_studio_url = st.text_input(
         "LM Studio API URL", 
-        value="http://localhost:1234/v1",
-        help="LM Studio의 Local Server 주소 (기본값: http://localhost:1234/v1)"
+        value=os.getenv("LM_STUDIO_URL", "http://localhost:1234"),
+        help="LM Studio의 Local Server 주소 (기본값: http://localhost:1234)"
+    )
+
+    # 2. 모델 선택 및 로드 (SDK 기능 통합)
+    if HAS_LMS_SDK:
+        # 1. 모델 리스트 가져오기 (딕셔너리 형태)
+        raw_list = get_downloaded_models()
+        
+        if raw_list:
+            # 2. { '화면에_보여줄_이름': '실제_경로' } 형태의 맵(Map) 생성
+            # 이름이 중복될 경우를 대비해 인덱스를 살짝 붙여주거나 파일명을 괄호에 넣음
+            model_map = {}
+            for item in raw_list:
+                label = item['label']
+                path = item['path']
+                
+                # 키 중복 방지 (이미 같은 이름이 있으면 파일명 일부 추가)
+                if label in model_map:
+                    # 예: EXAONE (Q4_K_M.gguf)
+                    filename = path.split('/')[-1]
+                    label = f"{label} ({filename})"
+                
+                model_map[label] = path
+
+            # 3. Selectbox에는 '키(이름)'만 넘겨줌 -> UI에 절대 딕셔너리가 안 뜸
+            selected_label = st.selectbox(
+                "사용할 모델 선택", 
+                options=list(model_map.keys()), # 문자열 리스트만 전달
+                index=0
+            )
+            
+            # 4. 선택된 이름으로 실제 경로 찾기
+            target_path = model_map[selected_label]
+            
+            # 모델 로드 버튼
+            if st.button("모델 로드 및 연결", use_container_width=True):
+                with st.spinner(f"'{selected_label}' 모델 로드 중..."):
+                    # 실제 경로는 여기서 사용
+                    ctx, err = switch_model_via_sdk(target_path)
+                    
+                    if err:
+                        st.error(f"로드 실패: {err}")
+                    else:
+                        st.session_state.model_id = selected_label
+                        st.session_state.detected_ctx = ctx
+                        st.success("로드 완료!")
+                        st.rerun()
+        else:
+            st.warning("다운로드된 모델을 찾을 수 없습니다.")
+    else:
+        st.error("SDK 미설치 (pip install lmstudio)")
+
+    # 3. 현재 연결 정보 표시 (레퍼런스 스타일)
+    current_model = st.session_state.get('model_id', 'Unknown')
+    current_ctx = st.session_state.get('detected_ctx', 4096)
+    
+    if current_model != "Unknown":
+        with st.expander("현재 모델 정보", expanded=True):
+            st.markdown(f"**모델명:** `{current_model}`")
+            st.markdown(f"**최대 컨텍스트:** `{current_ctx:,}` tokens")
+            st.info("SDK를 통해 모델 정보를 자동으로 가져왔습니다.")
+
+    st.markdown("---")
+    st.header("모델 파라미터")
+
+    # 4. 파라미터 설정
+    temperature = st.slider(
+        "Temperature", 
+        0.0, 1.0, 0.1, 0.1,
+        help="높을수록 창의적, 낮을수록 일관적입니다."
     )
     
-    # 고급 설정
-    with st.expander("🎛️ 모델 파라미터"):
-        temperature = st.slider("Temperature", 0.0, 1.0, 0.1, 0.1)
-        max_tokens = st.slider("Max Tokens", 128, 2048, 512, 128)
-        top_k = st.slider("Top-K (검색 결과 수)", 1, 10, 5, 1)
+    # Max Tokens 프리셋 버튼
+    col1, col2, col3 = st.columns(3)
+    with col1:
+        if st.button("짧게 (512)", use_container_width=True):
+            st.session_state.preset_tokens = 512
+    with col2:
+        if st.button("보통 (2K)", use_container_width=True):
+            st.session_state.preset_tokens = 2048
+    with col3:
+        if st.button("길게 (Max)", use_container_width=True):
+            st.session_state.preset_tokens = min(8192, current_ctx)
+
+    # 프리셋 적용 로직
+    default_max = min(2048, current_ctx)
+    if 'preset_tokens' in st.session_state:
+        default_max = st.session_state.preset_tokens
+        # 슬라이더 값 반영을 위해 session state 정리 (선택사항)
+        del st.session_state.preset_tokens
+        st.rerun()
+
+    max_tokens = st.slider(
+        "Max Tokens (출력 길이)", 
+        128, 
+        current_ctx, 
+        default_max,
+        128,
+        help=f"현재 모델의 최대 컨텍스트: {current_ctx:,} tokens"
+    )
     
-    # LM Studio 연결 상태 확인
-    if st.button("🔌 연결 테스트"):
-        try:
-            import requests
-            response = requests.get(
-                f"{lm_studio_url.replace('/v1', '')}/v1/models", 
-                timeout=3
-            )
-            if response.status_code == 200:
-                models = response.json()
-                model_list = models.get('data', [])
-                st.success(f"✅ 연결 성공!")
-                if model_list:
-                    st.info(f"📦 로드된 모델:\n{model_list[0].get('id', 'Unknown')}")
-                else:
-                    st.warning("⚠️ 로드된 모델이 없습니다. LM Studio에서 모델을 로드하세요.")
-            else:
-                st.error("❌ 연결 실패")
-        except Exception as e:
-            st.error(f"❌ 연결 불가: {str(e)}")
-            st.info("💡 LM Studio에서 'Start Server'를 눌렀는지 확인하세요.")
+    top_k = st.slider(
+        "검색 결과 수 (Top-K)", 
+        1, 10, 5, 1,
+        help="문서에서 가져올 참조 청크의 개수입니다."
+    )
     
     st.markdown("---")
-    st.header("📄 Upload Document")
-    uploaded_file = st.file_uploader("PDF 파일을 올려주세요", type="pdf")
+    st.header("문서 업로드")
+    uploaded_file = st.file_uploader("PDF 파일", type="pdf")
+
     st.markdown("---")
     
-    # 사용 가이드
-    with st.expander("📖 사용 방법"):
+    # 5. 도움말 및 정보 (레퍼런스 내용 복원)
+    with st.expander("사용 방법"):
         st.markdown("""
-        **1단계: LM Studio 준비**
-        - LM Studio 실행
-        - 모델 다운로드 및 로드
-        - 'Local Server' 탭에서 'Start Server' 클릭
+        **1단계: 모델 준비**
+        - 위 목록에서 모델을 선택하고 **'모델 로드 및 연결'** 버튼을 누르세요.
+        - LM Studio가 실행 중이어야 합니다.
         
-        **2단계: 문서 업로드**
-        - 왼쪽에서 PDF 파일 업로드
+        **2단계: 설정 확인**
+        - '현재 모델 정보'에서 컨텍스트 길이가 올바른지 확인하세요.
         
-        **3단계: 질문하기**
-        - 아래 채팅창에서 질문 입력
+        **3단계: 문서 업로드**
+        - PDF 파일을 업로드하면 자동으로 분석이 시작됩니다.
+        
+        **4단계: 질문하기**
+        - 채팅창에 논문 내용을 질문하거나 요약을 요청하세요.
         """)
     
-    st.info("💻 Windows 로컬 환경에서 실행 중")
-
-# 모델 로드 (캐싱하여 매번 로딩하지 않도록 함)
-@st.cache_resource
-def load_llm_and_embeddings(_lm_studio_url, _temperature, _max_tokens):
-    """LLM 및 임베딩 모델 로드"""
-    # 임베딩 모델 (로컬에서 실행)
-    embeddings = HuggingFaceEmbeddings(
-        model_name="sentence-transformers/all-MiniLM-L6-v2",
-        model_kwargs={'device': 'cpu'},  # Windows에서 안정적인 CPU 사용
-        encode_kwargs={'normalize_embeddings': True}
-    )
+    with st.expander("모델이 목록에 안 보이나요?"):
+        st.markdown("""
+        **LM Studio 확인:**
+        1. LM Studio의 'My Models' 폴더에 모델이 있는지 확인하세요.
+        2. LM Studio 프로그램이 실행 중인지 확인하세요.
+        3. `pip install lmstudio`가 설치되어 있는지 확인하세요.
+        """)
     
-    # LM Studio LLM (OpenAI 호환)
-    llm = ChatOpenAI(
-        base_url=_lm_studio_url,
-        api_key="lm-studio",  # LM Studio는 dummy key 사용
-        temperature=_temperature,
-        max_tokens=_max_tokens,
-        streaming=True  # 스트리밍 응답
-    )
-    return llm, embeddings
+    st.info("Windows 로컬 환경")
 
-llm, embeddings = load_llm_and_embeddings(lm_studio_url, temperature, max_tokens)
+
+llm, embeddings = load_models(lm_studio_url, temperature, max_tokens)
+
+
 
 # ==========================================
-# 2. 데이터 처리 로직
+# 메인 로직: 데이터 처리 및 채팅
 # ==========================================
-def is_garbage(text):
-    """노이즈 텍스트 필터링"""
-    if len(text) < 100: 
-        return True
-    num_count = len(re.findall(r'\d', text))
-    if num_count / len(text) > 0.2: 
-        return True
-    return False
 
-@st.cache_data
-def process_pdf(file_bytes, _embeddings, _top_k):
-    """PDF 처리 및 검색기 생성"""
-    # 임시 파일로 저장
-    with tempfile.NamedTemporaryFile(delete=False, suffix=".pdf") as tmp_file:
-        tmp_file.write(file_bytes)
-        tmp_path = tmp_file.name
+if "messages" not in st.session_state: st.session_state.messages = []
+if "retriever" not in st.session_state: st.session_state.retriever = None
+if "full_text" not in st.session_state: st.session_state.full_text = None
 
-    # PDF 로드
-    loader = PyPDFLoader(tmp_path)
-    pages = loader.load()
-    
-    # 텍스트 분할
-    text_splitter = RecursiveCharacterTextSplitter(
-        chunk_size=500, 
-        chunk_overlap=100,
-        separators=["\n\n", "\n", ".", "!", "?", ",", " ", ""]
-    )
-    raw_splits = text_splitter.split_documents(pages)
-    
-    # 정제 (Garbage Collection)
-    clean_splits = [doc for doc in raw_splits if not is_garbage(doc.page_content)]
-    
-    st.info(f"📊 총 {len(clean_splits)}개의 텍스트 청크 생성됨")
-    
-    # 벡터 DB & 검색기 생성
-    vectorstore = Chroma.from_documents(
-        documents=clean_splits, 
-        embedding=_embeddings,
-        persist_directory=None  # 메모리에만 저장 (빠른 처리)
-    )
-    chroma_retriever = vectorstore.as_retriever(search_kwargs={"k": _top_k})
-    
-    bm25_retriever = BM25Retriever.from_documents(clean_splits)
-    bm25_retriever.k = _top_k
-    
-    # 하이브리드 검색
-    ensemble_retriever = EnsembleRetriever(
-        retrievers=[bm25_retriever, chroma_retriever],
-        weights=[0.3, 0.7]  # Semantic search에 더 높은 가중치
-    )
-    
-    # 임시 파일 삭제
-    os.unlink(tmp_path)
-    
-    return ensemble_retriever
+# PDF 처리
+if uploaded_file and (st.session_state.retriever is None or st.session_state.full_text is None):
+    with st.spinner("PDF 분석 중..."):
+        # process_pdf는 (retriever, full_text) 두 개를 반환해야 함
+        retriever, full_text = process_pdf(
+            uploaded_file.getvalue(), embeddings, top_k
+        )
+        st.session_state.retriever = retriever
+        st.session_state.full_text = full_text
+    st.success("분석 완료!")
 
-# ==========================================
-# 3. UI 및 채팅 로직
-# ==========================================
-if "messages" not in st.session_state:
-    st.session_state.messages = []
+# 채팅 히스토리
+for msg in st.session_state.messages:
+    with st.chat_message(msg["role"]):
+        st.markdown(msg["content"])
 
-if "retriever" not in st.session_state:
-    st.session_state.retriever = None
-
-# PDF 업로드 처리
-if uploaded_file and st.session_state.retriever is None:
-    with st.spinner("📄 PDF를 분석하고 인덱싱하는 중... (잠시만 기다려주세요)"):
-        file_bytes = uploaded_file.getvalue()
-        st.session_state.retriever = process_pdf(file_bytes, embeddings, top_k)
-    st.success("✅ 분석 완료! 질문을 입력하세요.")
-    st.balloons()
-
-# 채팅 기록 표시
-for message in st.session_state.messages:
-    with st.chat_message(message["role"]):
-        st.markdown(message["content"])
-
-# 사용자 입력 처리
-if prompt := st.chat_input("논문에 대해 질문하세요..."):
-    if st.session_state.retriever is None:
-        st.error("❌ 먼저 PDF 파일을 업로드해주세요.")
+# 사용자 입력
+if prompt := st.chat_input("질문을 입력하세요..."):
+    if not st.session_state.retriever:
+        st.error("PDF를 먼저 업로드하세요")
     else:
-        # 사용자 메시지 표시
         st.chat_message("user").markdown(prompt)
         st.session_state.messages.append({"role": "user", "content": prompt})
 
-        # RAG 파이프라인
-        def format_docs(docs):
-            """검색된 문서 포맷팅"""
-            return "\n\n".join([
-                f"[출처: Page {d.metadata.get('page', '?')}]\n{d.page_content}" 
-                for d in docs
-            ])
+        # ==========================================
+        # [NEW] LLM Router: 의도 분류
+        # ==========================================
+        # 질문의 의도를 파악하는 가벼운 체인
+        router_template = """당신은 질문 분류기입니다. 사용자의 질문이 다음 중 어디에 해당하는지 분류하여 단어 하나만 출력하세요.
+        
+        1. "SUMMARY": 문서 전체의 요약, 주제, 전반적인 맥락, 혹은 범위가 넓은 질문. (예: "이 논문 요약해줘", "주요 내용이 뭐야?", "결론이 뭐야?")
+        2. "SEARCH": 특정 사실, 숫자, 정의, 구체적인 정보를 묻는 질문. (예: "A 알고리즘의 학습률은?", "저자의 이름은?", "3페이지 내용 보여줘")
 
-        # 프롬프트 템플릿
+        질문: {question}
+        분류(SUMMARY 또는 SEARCH):"""
+        
+        router_chain = ChatPromptTemplate.from_template(router_template) | llm | StrOutputParser()
+        
+        # UI에 분류 결과 표시 (디버깅용, 원치 않으면 주석 처리)
+        with st.status("질문 분석 중...", expanded=False) as status:
+            intent = router_chain.invoke({"question": prompt}).strip().upper()
+            status.update(label=f"질문 유형 감지: {intent}", state="complete")
+
+        # Context 설정 (Routing 결과 적용)
+        context_data = ""
+        source_info = ""
+
+        if "SUMMARY" in intent:
+            # [SUMMARY 모드] 전체 텍스트 사용
+            # 모델 Context Limit에서 Output 토큰과 여유분을 뺀 만큼만 입력
+            safe_limit = st.session_state.detected_ctx - max_tokens - 500
+            # 한글/영어 섞임 고려하여 대략 3배수로 자름 (단순화된 로직)
+            char_limit = int(safe_limit * 2.5)
+            
+            context_data = st.session_state.full_text[:char_limit]
+            source_info = f"\n\n*( 전체 문서 분석 모드 | Context: {safe_limit} tokens )*"
+        else:
+            # [SEARCH 모드] RAG 검색 사용
+            docs = st.session_state.retriever.invoke(prompt)
+            context_data = "\n\n".join([f"[Page {d.metadata.get('page','?')}] {d.page_content}" for d in docs])
+            source_info = "\n\n*( 정밀 검색 모드 )*"
+        
+        
+        
+        # 답변 생성    
         template = """당신은 논문 분석 전문가입니다. 주어진 문맥을 기반으로 질문에 답변하세요.
 
 [제약 조건]
@@ -216,55 +279,28 @@ if prompt := st.chat_input("논문에 대해 질문하세요..."):
 
 [답변]:"""
         
-        prompt_template = ChatPromptTemplate.from_template(template)
-        
-        # RAG Chain 구성
-        rag_chain = (
-            {
-                "context": st.session_state.retriever | format_docs, 
-                "question": RunnablePassthrough()
-            }
-            | prompt_template
+        chain = (
+            {"context": lambda x: context_data, "question": RunnablePassthrough()}
+            | ChatPromptTemplate.from_template(template)
             | llm
             | StrOutputParser()
         )
-        
-        # 스트리밍 응답
-        with st.chat_message("assistant"):
-            response_placeholder = st.empty()
-            full_response = ""
-            
-            try:
-                for chunk in rag_chain.stream(prompt):
-                    full_response += chunk
-                    response_placeholder.markdown(full_response + "▌")
-                
-                response_placeholder.markdown(full_response)
-                
-            except Exception as e:
-                error_msg = f"❌ 에러 발생: {str(e)}"
-                st.error(error_msg)
-                
-                # 디버깅 정보
-                with st.expander("🔍 에러 상세 정보"):
-                    st.code(str(e))
-                    st.markdown("""
-                    **해결 방법:**
-                    1. LM Studio에서 모델이 로드되어 있는지 확인
-                    2. LM Studio의 'Local Server'가 실행 중인지 확인
-                    3. 왼쪽 사이드바에서 '🔌 연결 테스트' 버튼 클릭
-                    4. 포트 번호가 맞는지 확인 (기본값: 1234)
-                    """)
-                
-                full_response = "죄송합니다. 응답 생성 중 오류가 발생했습니다."
-        
-        st.session_state.messages.append({
-            "role": "assistant", 
-            "content": full_response
-        })
 
-# 채팅 초기화 버튼
+        with st.chat_message("assistant"):
+            placeholder = st.empty()
+            full_response = ""
+            try:
+                for chunk in chain.stream(prompt):
+                    full_response += chunk
+                    placeholder.markdown(full_response + "▌")
+                placeholder.markdown(full_response + source_info)
+            except Exception as e:
+                st.error(f"Error: {e}")
+        
+        st.session_state.messages.append({"role": "assistant", "content": full_response + source_info})
+
+# 채팅 초기화
 if st.session_state.messages:
-    if st.sidebar.button("🗑️ 채팅 기록 초기화"):
+    if st.sidebar.button("채팅 기록 초기화"):
         st.session_state.messages = []
         st.rerun()

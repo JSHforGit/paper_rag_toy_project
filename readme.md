@@ -65,13 +65,30 @@ LM Studio 실행 후:
 
 ### Step 2: Python 환경 설정
 
-#### 2.1 가상환경 생성 (권장)
+#### 2.1 가상환경 생성 및 설치 (권장)
+
+**방법 1: Conda 사용 (권장)**
+```bash
+# Conda가 설치되어 있는 경우
+cd [프로젝트 폴더 경로]
+
+# environment.yml로 환경 생성 (Python 3.12 + 모든 패키지 자동 설치)
+conda env create -f environment.yml
+
+# 환경 활성화
+conda activate paper_rag
+
+# 설치 확인
+python --version  # Python 3.12.x 출력되어야 함
+```
+
+**방법 2: Python venv 사용**
 ```bash
 # CMD 또는 PowerShell에서 실행
 cd [프로젝트 폴더 경로]
 
-# Python 버전 확인
-python --version  # 3.12 이상이어야 함
+# Python 버전 확인 (3.12 이상 필요)
+python --version
 
 # 가상환경 생성
 python -m venv venv
@@ -84,28 +101,29 @@ venv\Scripts\activate
 venv\Scripts\Activate.ps1
 
 # 활성화 확인 (프롬프트 앞에 (venv) 표시됨)
-```
 
-#### 2.2 패키지 설치
-```bash
-# requirements.txt 방식
+# 패키지 설치
 pip install -r requirements.txt
-
-# 또는 Conda 사용 시
-conda env create -f environment.yml
-conda activate paper_rag
 ```
 
 **설치 중 오류 발생 시**:
 ```bash
-# pip 업그레이드 먼저 시도
-python -m pip install --upgrade pip
+# Conda 환경 재생성
+conda env remove -n paper_rag
+conda env create -f environment.yml
 
-# 개별 설치
+# 또는 pip 사용 시 업그레이드 후 재시도
+python -m pip install --upgrade pip
+pip install -r requirements.txt
+
+# 개별 패키지 설치가 필요한 경우
 pip install streamlit langchain langchain-openai langchain-community
-pip install pypdf chromadb sentence-transformers
-pip install lmstudio rank_bm25 python-dotenv
+pip install pypdf chromadb sentence-transformers huggingface-hub
+pip install lmstudio rank_bm25 python-dotenv langchain-huggingface langchain-classic
 ```
+
+> **💡 추천**: Conda를 사용하면 Python 버전과 모든 의존성이 자동으로 설치되어 편리합니다.  
+> Conda가 없다면 [Miniconda](https://docs.conda.io/en/latest/miniconda.html) 또는 [Anaconda](https://www.anaconda.com/download)를 먼저 설치하세요.
 
 ---
 

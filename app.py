@@ -265,8 +265,11 @@ if prompt := st.chat_input("질문을 입력하세요..."):
         else:
             # [SEARCH 모드] RAG 검색 사용
             docs = st.session_state.retriever.invoke(prompt)
-            context_data = "\n\n".join([f"[Page {d.metadata.get('page','?')}] {d.page_content}" for d in docs])
-            source_info = "\n\n*( 정밀 검색 모드 )*"
+            context_data = "\n\n".join([
+                f"[{d.metadata.get('chapter', 'Section')} | Page {d.metadata.get('pages', '?')}] {d.page_content}"
+                for d in docs
+            ])
+            source_info = "\n\n*( 검색 모드 )*"
         
         
         
@@ -278,7 +281,12 @@ if prompt := st.chat_input("질문을 입력하세요..."):
 2. 전문 용어는 영어 원문을 유지하세요 (예: 'Diffusion Model', 'Attention Mechanism').
 3. 답변은 한국어로 작성하되, 필요시 영어 용어를 병기하세요.
 4. 문맥에서 답을 찾을 수 없다면 "제공된 문서에서 해당 내용을 찾을 수 없습니다"라고 답하세요.
-5. 답변 마지막에 참고한 페이지 번호를 명시하세요.
+5. **답변의 끝이나 각 문장의 끝에 `(Page: 번호)` 형식을 사용하여 출처를 명시하세요.**
+   - 예시: "...라는 결과가 나타났다 (Page: 5)."
+   - 예시: "Table 3에 따르면... (Page: 7,8,9)."
+6. 물결표(~)를 사용하여 '시작 ~ 끝'을 표현하는 대신 "--"를 사용하여 연속된 값을 표기하세요
+   - 나쁜 예시 : (B.1~B.3), (Page: 20~25)
+   - 좋은 예시 : (B.1 -- B.3), (Page: 20 -- 25)
 
 [문맥]:
 {context}
@@ -350,7 +358,7 @@ if prompt := st.chat_input("질문을 입력하세요..."):
                 if reasoning_content:
                     reasoning_area.empty() # 기존 placeholder 제거
                     with reasoning_area.container():
-                        with st.expander("💭 사고 과정 (Thinking Process)", expanded=False):
+                        with st.expander("사고 과정 (Thinking Process)", expanded=False):
                             st.markdown(reasoning_content)
 
             except Exception as e:

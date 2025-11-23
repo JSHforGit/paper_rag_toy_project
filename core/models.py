@@ -1,6 +1,6 @@
 import re
 import requests
-from langchain_community.embeddings import HuggingFaceEmbeddings
+from langchain_huggingface import HuggingFaceEmbeddings
 from langchain_openai import ChatOpenAI
 import streamlit as st
 

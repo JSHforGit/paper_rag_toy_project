@@ -1,5 +1,6 @@
-import streamlit as st
+import re
 import os
+import streamlit as st
 from dotenv import load_dotenv
 
 from langchain_core.prompts import ChatPromptTemplate
@@ -226,19 +227,26 @@ if prompt := st.chat_input("질문을 입력하세요..."):
         # [NEW] LLM Router: 의도 분류
         # ==========================================
         # 질문의 의도를 파악하는 가벼운 체인
-        router_template = """당신은 질문 분류기입니다. 사용자의 질문이 다음 중 어디에 해당하는지 분류하여 단어 하나만 출력하세요.
+        router_template = """Task: Classify the user's question into 'SUMMARY' or 'SEARCH'.
         
-        1. "SUMMARY": 문서 전체의 요약, 주제, 전반적인 맥락, 혹은 범위가 넓은 질문. (예: "이 논문 요약해줘", "주요 내용이 뭐야?", "결론이 뭐야?")
-        2. "SEARCH": 특정 사실, 숫자, 정의, 구체적인 정보를 묻는 질문. (예: "A 알고리즘의 학습률은?", "저자의 이름은?", "3페이지 내용 보여줘")
+        Rules:
+        1. "SUMMARY": Broad questions, summaries, overviews, main topics.
+        2. "SEARCH": Specific facts, numbers, page lookup, definitions.
+        3. Do NOT generate <think> tags or reasoning. 
+        4. Output ONLY the class name.
 
-        질문: {question}
-        분류(SUMMARY 또는 SEARCH):"""
+        Question: {question}
+        Class:"""
         
         router_chain = ChatPromptTemplate.from_template(router_template) | llm | StrOutputParser()
         
         # UI에 분류 결과 표시 (디버깅용, 원치 않으면 주석 처리)
         with st.status("질문 분석 중...", expanded=False) as status:
-            intent = router_chain.invoke({"question": prompt}).strip().upper()
+            raw_intent = router_chain.invoke({"question": prompt}).strip().upper()
+            clean_intent = re.sub(r'<think>.*?</think>', '', raw_intent, flags=re.DOTALL).strip().upper()
+        
+            # 텍스트에 SUMMARY나 SEARCH가 포함되어 있는지 확인 (더 안전하게)
+            intent = "SUMMARY" if "SUMMARY" in clean_intent else "SEARCH"
             status.update(label=f"질문 유형 감지: {intent}", state="complete")
 
         # Context 설정 (Routing 결과 적용)
@@ -281,23 +289,82 @@ if prompt := st.chat_input("질문을 입력하세요..."):
         
         chain = (
             {"context": lambda x: context_data, "question": RunnablePassthrough()}
-            | ChatPromptTemplate.from_template(template)
-            | llm
+            | ChatPromptTemplate.from_template(template) 
+            | llm 
             | StrOutputParser()
         )
 
         with st.chat_message("assistant"):
-            placeholder = st.empty()
-            full_response = ""
+            # 두 개의 영역 준비: 사고 과정(Expander) + 최종 답변(Main)
+            reasoning_area = st.empty()
+            answer_area = st.empty()
+            
+            # 상태 변수
+            full_response = ""       # 전체 로그 저장용
+            reasoning_content = ""   # 사고 과정 텍스트
+            answer_content = ""      # 최종 답변 텍스트
+            is_thinking = False      # 현재 사고 중인가?
+            
             try:
                 for chunk in chain.stream(prompt):
                     full_response += chunk
-                    placeholder.markdown(full_response + "▌")
-                placeholder.markdown(full_response + source_info)
+
+                    # [State Machine] 태그 감지 및 모드 전환
+                    # 1. 사고 시작 감지 (<think>)
+                    if "<think>" in chunk:
+                        is_thinking = True
+                        chunk = chunk.replace("<think>", "")
+                        
+                        # UI: 사고 과정 영역 생성
+                        with reasoning_area.container():
+                            with st.expander("💭 사고 과정 (Thinking Process)", expanded=True):
+                                reasoning_placeholder = st.empty()
+                    
+                    # 2. 사고 종료 감지 (</think>)
+                    if "</think>" in chunk:
+                        is_thinking = False
+                        chunk = chunk.replace("</think>", "")
+                        
+                        # UI: 사고 과정 완료 상태로 업데이트 (접힌 상태로 바꾸거나 유지)
+                        with reasoning_area.container():
+                            with st.expander("💭 사고 과정 (Thinking Process)", expanded=False):
+                                st.markdown(reasoning_content)
+                    
+
+                    # [Display] 모드에 따른 출력 위치 결정
+                    if is_thinking:
+                        reasoning_content += chunk
+                        # expander 내부 placeholder 업데이트
+                        try:
+                            reasoning_placeholder.markdown(reasoning_content + "▌")
+                        except:
+                            pass
+                    else:
+                        answer_content += chunk
+                        answer_area.markdown(answer_content + "▌")
+
+                # 스트리밍 종료 후 마무리 (커서 제거 및 출처 부착)
+                answer_area.markdown(answer_content + source_info)
+                
+                # 사고 과정이 있었던 경우, 최종적으로 깔끔하게 렌더링
+                if reasoning_content:
+                    reasoning_area.empty() # 기존 placeholder 제거
+                    with reasoning_area.container():
+                        with st.expander("💭 사고 과정 (Thinking Process)", expanded=False):
+                            st.markdown(reasoning_content)
+
             except Exception as e:
                 st.error(f"Error: {e}")
         
-        st.session_state.messages.append({"role": "assistant", "content": full_response + source_info})
+        # 히스토리에는 '최종 답변'만 저장할지, '사고 과정'도 포함할지 결정
+        # 보통은 깔끔하게 최종 답변만 저장하거나, 포맷팅해서 저장함
+        final_save_content = answer_content + source_info
+        
+        # (선택사항) 히스토리에서도 사고 과정을 보고 싶다면 아래 주석 해제
+        # if reasoning_content:
+        #     final_save_content = f"<details><summary>사고 과정</summary>{reasoning_content}</details>\n\n" + final_save_content
+            
+        st.session_state.messages.append({"role": "assistant", "content": final_save_content})
 
 # 채팅 초기화
 if st.session_state.messages:

@@ -1,0 +1,7 @@
+# .gitignore
+.env
+*.env
+.streamlit/secrets.toml
+__pycache__/
+*.pyc
+.DS_Store

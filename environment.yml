@@ -1,0 +1,18 @@
+name: paper_rag
+channels:
+  - conda-forge
+  - defaults
+dependencies:
+  - python=3.13
+  - pip
+  - pip:
+    - streamlit
+    - langchain
+    - langchain-openai
+    - langchain-community
+    - pypdf
+    - chromadb
+    - sentence-transformers
+    - huggingface-hub
+    - requests
+    - python-dotenv

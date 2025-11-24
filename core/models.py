@@ -67,7 +67,24 @@ def switch_model_via_sdk(model_path):
         
         return int(ctx) if ctx else 4096, None
     except Exception as e:
-        return None, str(e)    
+        return None, str(e)
+    
+    
+def get_current_loaded_model_info():
+    """
+    LM Studio 서버에 현재 로드된 모델 정보 가져오기
+    """
+    if not HAS_LMS_SDK:
+        return None, 4096
+    
+    try:
+        model = lms.llm()  # 인자 없이 호출하면 현재 로드된 모델
+        ctx = model.get_context_length()
+        model_name = getattr(model, 'display_name', 'Unknown Model')
+        return model_name, int(ctx) if ctx else 4096
+    except:
+        return None, 4096
+
 
 # 모델 로드
 @st.cache_resource

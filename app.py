@@ -209,6 +209,18 @@ if uploaded_file and (st.session_state.retriever is None or st.session_state.ful
         st.session_state.retriever = retriever
         st.session_state.full_text = full_text
     st.success("분석 완료!")
+    
+# 모델을 PDF 처리 이후 로딩할 경우를 대비
+if "model_id" not in st.session_state or "detected_ctx" not in st.session_state:
+    if HAS_LMS_SDK:
+        from core.models import get_current_loaded_model_info
+        auto_model, auto_ctx = get_current_loaded_model_info()
+        st.session_state.model_id = auto_model or "Unknown"
+        st.session_state.detected_ctx = auto_ctx
+    else:
+        st.session_state.model_id = "Unknown"
+        st.session_state.detected_ctx = 4096
+
 
 # 채팅 히스토리
 for msg in st.session_state.messages:
